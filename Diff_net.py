@@ -44,7 +44,7 @@ def save_generated_images(samples, folder="generated_images", filename="output.p
 
 # CONFIGURATION
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-T = 300 * 3 * 3  # Reduced number of diffusion steps
+T = 300 * 3 * 3 * 3 * 2  # Reduced number of diffusion steps
 beta_start, beta_end = 1e-4, 0.02  # Noise schedule
 betas = torch.linspace(beta_start, beta_end, T).to(device)
 alphas = 1 - betas
@@ -62,27 +62,65 @@ def add_noise(x_0, t):
 class SkipUNet(nn.Module):
     def __init__(self, nx=28, ny=28, dropout=0.3):
         super().__init__()
-        
+
         self.dropout = dropout
         self.nx = nx
         self.ny = ny
-        
+
         # Encoder
-        self.enc1 = nn.Sequential(nn.Conv2d(1, nx, 3, padding=1), nn.ReLU())
-        self.enc2 = nn.Sequential(nn.Conv2d(nx, nx*2, 3, stride=2, padding=1), nn.ReLU())
-        self.enc3 = nn.Sequential(nn.Conv2d(nx*2, nx*4, 3, stride=2, padding=1), nn.ReLU())
-        self.enc4 = nn.Sequential(nn.Conv2d(nx*4, nx*8, 3, stride=2, padding=1), nn.ReLU())  # New layer
+        self.enc1 = nn.Sequential(
+            nn.Conv2d(1, nx, 3, padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )
+        self.enc2 = nn.Sequential(
+            nn.Conv2d(nx, nx * 2, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )
+        self.enc3 = nn.Sequential(
+            nn.Conv2d(nx * 2, nx * 4, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )
+        self.enc4 = nn.Sequential(
+            nn.Conv2d(nx * 4, nx * 8, 3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )  # New layer
 
         # Middle
-        self.middle = nn.Sequential(nn.Conv2d(nx*8, nx*8, 3, padding=1), nn.ReLU(), nn.Dropout(self.dropout))  # Added Dropout
+        self.middle = nn.Sequential(
+            nn.Conv2d(nx * 8, nx * 8, 3, padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout),
+            nn.Conv2d(nx * 8, nx * 8, 3, padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )  # Extended Middle with additional layers
 
         # Decoder with Skip Connections
-        self.dec4 = nn.Sequential(nn.ConvTranspose2d(nx*8 + nx*8, nx*4, 3, stride=2, padding=1, output_padding=1), nn.ReLU())  # Skip from enc4
-        self.dec3 = nn.Sequential(nn.ConvTranspose2d(nx*4 + nx*4, nx*2, 3, stride=2, padding=1, output_padding=1), nn.ReLU())  # Skip from enc3
-        self.dec2 = nn.Sequential(nn.ConvTranspose2d(nx*2 + nx*2, nx, 3, stride=2, padding=1, output_padding=1), nn.ReLU())  # Skip from enc2
-        self.dec1 = nn.Conv2d(nx + nx, 1, 3, padding=1)  # Skip from enc1
+        self.dec4 = nn.Sequential(
+            nn.ConvTranspose2d(nx * 8 + nx * 8, nx * 4, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )  # Skip from enc4
+        self.dec3 = nn.Sequential(
+            nn.ConvTranspose2d(nx * 4 + nx * 4, nx * 2, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )  # Skip from enc3
+        self.dec2 = nn.Sequential(
+            nn.ConvTranspose2d(nx * 2 + nx * 2, nx, 3, stride=2, padding=1, output_padding=1),
+            nn.ReLU(),
+            nn.Dropout(self.dropout)
+        )  # Skip from enc2
+        self.dec1 = nn.Sequential(
+            nn.Conv2d(nx + nx, 1, 3, padding=1),
+            nn.Dropout(self.dropout)
+        )  # Skip from enc1
 
-    def forward(self, x, t):
+    def forward(self, x):
         # Encoder path
         e1 = self.enc1(x)
         e2 = self.enc2(e1)
@@ -100,11 +138,12 @@ class SkipUNet(nn.Module):
 
         return d1
 
-    def center_crop(self, layer, target_size):
+    @staticmethod
+    def center_crop(layer, target_size):
         _, _, layer_height, layer_width = layer.size()
         diff_y = (layer_height - target_size.size(2)) // 2
         diff_x = (layer_width - target_size.size(3)) // 2
-        return layer[:, :, diff_y:(diff_y + target_size.size(2)), diff_x:(diff_x + target_size.size(3))]
+        return layer[:, :, diff_y: (diff_y + target_size.size(2)), diff_x: (diff_x + target_size.size(3))]
 
 # TRAINING THE DIFFUSION MODEL
 transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))])
@@ -112,7 +151,11 @@ mnist = torchvision.datasets.MNIST(root="./data", train=True, transform=transfor
 dataloader = torch.utils.data.DataLoader(mnist, batch_size=64, shuffle=True)
 
 nx, ny = 28, 28  # Image dimensions
-model = SkipUNet(nx=nx, ny=ny).to(device)
+epochs = 300
+patience = 30
+dropout = 0.3
+
+model = SkipUNet(nx=nx, ny=ny, dropout=dropout).to(device)
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, weight_decay=1e-2)
 criterion = nn.SmoothL1Loss()  # Consider using SmoothL1Loss instead of MSELoss for better convergence
 
@@ -120,8 +163,6 @@ criterion = nn.SmoothL1Loss()  # Consider using SmoothL1Loss instead of MSELoss 
 scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.5)
 plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=25, verbose=True)
 
-epochs = 300
-patience =25
 dropout_patience_counter = 0
 previous_avg_loss = float('inf')
 
@@ -133,9 +174,9 @@ for epoch in range(epochs):
         x_0 = x_0.to(device)
         t = torch.randint(0, T, (x_0.shape[0],), device=device)  # Random time steps
         x_t, noise = add_noise(x_0, t)
-        
+
         optimizer.zero_grad()
-        predicted_noise = model(x_t, t)  # Predict noise
+        predicted_noise = model(x_t)  # Predict noise
         loss = criterion(predicted_noise, noise)  # Loss calculation
         loss.backward()
         optimizer.step()
@@ -162,7 +203,7 @@ for epoch in range(epochs):
             for module in model.modules():
                 if isinstance(module, nn.Dropout):
                     module.p = max(0.001, module.p * 0.75)
-            print(f"Reduced dropout rate to {model.middle[2].p}")
+            print(f"Reduced dropout rate to {model.middle[3].p}")
             dropout_patience_counter = 0
 
 # SAMPLING FROM NOISE
@@ -172,7 +213,7 @@ def sample(num_samples=16):
     x_t = torch.randn((num_samples, 1, 28, 28)).to(device)  # Start from pure noise
     for t in reversed(range(T)):
         z = torch.randn_like(x_t) if t > 0 else 0  # No noise at step t=0
-        predicted_noise = model(x_t, torch.tensor([t] * num_samples, device=device))
+        predicted_noise = model(x_t)
         x_t = (x_t - betas[t] * predicted_noise) / torch.sqrt(alphas[t]) + torch.sqrt(betas[t]) * z
     return x_t
 
@@ -180,4 +221,4 @@ def sample(num_samples=16):
 samples = sample().cpu().numpy().squeeze()
 
 # Plot results
-save_generated_images(samples, folder="generated_images", filename="output3.png")
+save_generated_images(samples, folder="generated_images", filename="output5.png")
