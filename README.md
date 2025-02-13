@@ -10,6 +10,8 @@ This neural network is an example of a simple diffusion neural network that gene
 
 ## Example of generated image:
 
+![Sample Output](https://github.com/Vlasenko2006/Diff_model/blob/main/output5.png)
+
 
 ## Model Architecture
 
